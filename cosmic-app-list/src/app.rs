@@ -300,14 +300,10 @@ impl DockItem {
         let icon_button: Element<_> = if interaction_enabled {
             mouse_area(
                 icon_button
-                    .on_press_maybe(if toplevel_count == 0 {
-                        Some(Message::Exec(Arc::clone(desktop_info), None, None))
-                    } else if toplevel_count == 1 {
-                        filtered_toplevels
-                            .first()
-                            .map(|t| Message::Toggle(t.0.foreign_toplevel.clone()))
+                    .on_press_maybe(if let Some(toplevel) = filtered_toplevels.first() {
+                        Some(Message::Toggle(toplevel.0.foreign_toplevel.clone()))
                     } else {
-                        Some(Message::ToplevelListPopup(*id, window_id))
+                        Some(Message::Exec(Arc::clone(desktop_info), None, None))
                     })
                     .width(Length::Shrink)
                     .height(Length::Shrink),
@@ -1345,21 +1341,20 @@ impl cosmic::Application for CosmicAppList {
                             let new_desktop_info =
                                 self.find_desktop_entry_for_toplevel(&info, unicase_appid);
 
-                            if let Some(t) = self
-                                .active_list
-                                .iter_mut()
-                                .chain(self.pinned_list.iter_mut())
-                                .find(|DockItem { desktop_info, .. }| {
-                                    desktop_info.id() == new_desktop_info.id()
-                                })
-                            {
-                                t.toplevels.push((info, None));
-                            } else {
-                                if info.app_id.is_empty() {
-                                    info.app_id = format!("Unknown Application {}", self.item_ctr);
-                                }
-                                self.item_ctr += 1;
+                            if info.app_id.is_empty() {
+                                info.app_id = format!("Unknown Application {}", self.item_ctr);
+                            }
+                            self.item_ctr += 1;
 
+                            // Keep one DockItem per window. If this app is pinned and its
+                            // pinned item is still a launcher, attach the first window to it.
+                            let pinned_launcher = self.pinned_list.iter_mut().find(|item| {
+                                item.desktop_info.id() == new_desktop_info.id()
+                                    && item.toplevels.is_empty()
+                            });
+                            if let Some(item) = pinned_launcher {
+                                item.toplevels.push((info, None));
+                            } else {
                                 self.active_list.push(DockItem {
                                     id: self.item_ctr,
                                     original_app_id: info.app_id.clone(),
@@ -1395,66 +1390,56 @@ impl cosmic::Application for CosmicAppList {
                             }
                         }
                         ToplevelUpdate::Update(info) => {
-                            // TODO probably want to make sure it is removed
                             if info.app_id.is_empty() {
                                 return Task::none();
                             }
-                            let mut updated_appid = false;
 
-                            'toplevel_loop: for toplevel_list in self
+                            let mut app_id_changed = false;
+                            for item in self
                                 .active_list
                                 .iter_mut()
                                 .chain(self.pinned_list.iter_mut())
                             {
-                                for (t_info, _) in &mut toplevel_list.toplevels {
-                                    if info.foreign_toplevel == t_info.foreign_toplevel {
-                                        if info.app_id != t_info.app_id {
-                                            updated_appid = true;
-                                        }
-
+                                if let Some((t_info, _)) = item
+                                    .toplevels
+                                    .iter_mut()
+                                    .find(|(t_info, _)| {
+                                        t_info.foreign_toplevel == info.foreign_toplevel
+                                    })
+                                {
+                                    app_id_changed = t_info.app_id != info.app_id;
+                                    if !app_id_changed {
                                         *t_info = info.clone();
-                                        break 'toplevel_loop;
                                     }
+                                    break;
                                 }
                             }
 
-                            if updated_appid {
-                                // remove the current toplevel from its dock item
-                                for t in self
+                            if app_id_changed {
+                                // Move only this window; never remove other windows which
+                                // happen to share either the old or the new application ID.
+                                for item in self
                                     .active_list
                                     .iter_mut()
                                     .chain(self.pinned_list.iter_mut())
                                 {
-                                    t.toplevels
-                                        .retain(|(t_info, _)| t_info.app_id != info.app_id);
+                                    item.toplevels.retain(|(t_info, _)| {
+                                        t_info.foreign_toplevel != info.foreign_toplevel
+                                    });
                                 }
-                                self.active_list.retain(|t| !t.toplevels.is_empty());
+                                self.active_list.retain(|item| !item.toplevels.is_empty());
 
-                                // find a new one for it
                                 let new_desktop_entry = self.find_desktop_entry_for_toplevel(
                                     &info,
                                     Ascii::new(&info.app_id),
                                 );
-
-                                if let Some(t) = self
-                                    .active_list
-                                    .iter_mut()
-                                    .chain(self.pinned_list.iter_mut())
-                                    .find(|DockItem { desktop_info, .. }| {
-                                        desktop_info.id() == new_desktop_entry.id()
-                                    })
-                                {
-                                    t.toplevels.push((info, None));
-                                } else {
-                                    self.item_ctr += 1;
-
-                                    self.active_list.push(DockItem {
-                                        id: self.item_ctr,
-                                        original_app_id: info.app_id.clone(),
-                                        toplevels: vec![(info, None)],
-                                        desktop_info: Arc::new(new_desktop_entry),
-                                    });
-                                }
+                                self.item_ctr += 1;
+                                self.active_list.push(DockItem {
+                                    id: self.item_ctr,
+                                    original_app_id: info.app_id.clone(),
+                                    toplevels: vec![(info, None)],
+                                    desktop_info: Arc::new(new_desktop_entry),
+                                });
                             }
                         }
                     },
@@ -1548,14 +1533,17 @@ impl cosmic::Application for CosmicAppList {
             }
             Message::ConfigUpdated(config) => {
                 self.config = config;
-                // drain to active list
+                // Return any running pinned windows to the active list. Each entry represents
+                // exactly one window, so selecting one below cannot absorb its siblings.
                 for item in self.pinned_list.drain(..) {
                     if !item.toplevels.is_empty() {
                         self.active_list.push(item);
                     }
                 }
 
-                // pull back configured items into the favorites list
+                // Rebuild favorites, claiming at most one running window for each pinned
+                // launcher. Other windows of the same application stay as separate active
+                // buttons.
                 self.pinned_list =
                     find_desktop_entries(&self.desktop_entries, &self.config.favorites)
                         .zip(&self.config.favorites)
@@ -1563,13 +1551,11 @@ impl cosmic::Application for CosmicAppList {
                             if let Some(p) = self
                                 .active_list
                                 .iter()
-                                // match using heuristic id
-                                .position(|dock_item| dock_item.desktop_info.id() == de.id())
+                                .position(|item| item.desktop_info.id() == de.id())
                             {
-                                let mut d = self.active_list.remove(p);
-                                // but use the id from the config
-                                d.original_app_id.clone_from(original_id);
-                                d
+                                let mut item = self.active_list.remove(p);
+                                item.original_app_id.clone_from(original_id);
+                                item
                             } else {
                                 self.item_ctr += 1;
                                 DockItem {

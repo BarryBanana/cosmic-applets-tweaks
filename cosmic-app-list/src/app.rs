@@ -188,6 +188,20 @@ struct DockItem {
 }
 
 impl DockItem {
+    fn tooltip(&self, locales: &[String]) -> String {
+        self.toplevels
+            .first()
+            .map(|(info, _)| info.title.trim())
+            .filter(|title| !title.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                self.desktop_info
+                    .full_name(locales)
+                    .unwrap_or_default()
+                    .into_owned()
+            })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn as_icon(
         &self,
@@ -1793,11 +1807,7 @@ impl cosmic::Application for CosmicAppList {
                             self.core.main_window_id().unwrap(),
                             Some(&|info| self.is_on_current_monitor_and_workspace(info)),
                         ),
-                        dock_item
-                            .desktop_info
-                            .full_name(&self.locales)
-                            .unwrap_or_default()
-                            .into_owned(),
+                        dock_item.tooltip(&self.locales),
                         self.popup.is_some(),
                         Message::Surface,
                         None,
@@ -1904,11 +1914,7 @@ impl cosmic::Application for CosmicAppList {
                                 self.core.main_window_id().unwrap(),
                                 Some(&|info| self.is_on_current_monitor_and_workspace(info)),
                             ),
-                            dock_item
-                                .desktop_info
-                                .full_name(&self.locales)
-                                .unwrap_or_default()
-                                .into_owned(),
+                            dock_item.tooltip(&self.locales),
                             self.popup.is_some(),
                             Message::Surface,
                             None,
@@ -2432,11 +2438,7 @@ impl cosmic::Application for CosmicAppList {
                                 id,
                                 Some(&|info| self.is_on_current_monitor_and_workspace(info)),
                             ),
-                            dock_item
-                                .desktop_info
-                                .full_name(&self.locales)
-                                .unwrap_or_default()
-                                .to_string(),
+                            dock_item.tooltip(&self.locales),
                             self.popup.is_some(),
                             Message::Surface,
                             Some(id),
